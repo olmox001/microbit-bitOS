@@ -1634,6 +1634,19 @@ states.addLoopHandler("app_files", function () {
     const flist = _fmCache
     let k = KBD.poll()
     while (k >= 0) {
+        // === PRIORITY 1: Virtual Keyboard ===
+        if (VKB.isVisible()) {
+            VKB.handleKey(k)
+            k = KBD.poll()
+            continue
+        }
+        // === PRIORITY 2: File Browser (UI) ===
+        if (UI.isFBVisible()) {
+            UI.handleFB(k)
+            k = KBD.poll()
+            continue
+        }
+
         if (_fmMode === 0) { // LISTA
             if (k === KBD.B) {
                 if (_fmPath === "") { _exitToLauncher(); return }
@@ -2527,6 +2540,14 @@ states.addLoopHandler("app_config", function () {
     const items = _cfgItems()
     let k = KBD.poll()
     while (k >= 0) {
+        // === PRIORITY: Virtual Keyboard ===
+        if (VKB.isVisible()) {
+            VKB.handleKey(k)
+            // VKB may hide itself in its callback; continue loop
+            k = KBD.poll()
+            continue
+        }
+
         if (_cfgMode === 0) {
             if (k === KBD.B) { _exitToLauncher(); return }
             else if (k === KBD.UP) {
@@ -2539,8 +2560,10 @@ states.addLoopHandler("app_config", function () {
                 if (!Security.isRoot()) actionIdx += 1 // offset per array senza password
 
                 if (actionIdx === 0) {
+                    // Change root password – hide VKB after callback
                     VKB.show(function (txt: string | null) {
                         if (txt !== null && txt.length > 0) FS.write("/sys/rootpw", "pass|" + txt)
+                        VKB.hide()
                     }, "")
                 } else if (actionIdx === 1) {
                     LANG.set(LANG.id === 0 ? 1 : 0)

@@ -1823,6 +1823,8 @@ states.addLoopHandler("app_editor", function () {
             } else if (k === KBD.A) {
                 // INSERT MODE (Direct VKB)
                 if (!Security.isRoot()) { SND.error(); UI.toast("Read-Only"); return }
+                
+                // CORREZIONE: Rimosso il terzo callback (onMove) per evitare conflitti con il D-pad
                 VKB.showDirect(function (ch: string) {
                     const l = _edLines[_edCurY]
                     _edLines[_edCurY] = l.substr(0, _edCurX) + ch + l.substr(_edCurX)
@@ -1839,18 +1841,8 @@ states.addLoopHandler("app_editor", function () {
                         _edLines.splice(_edCurY, 1)
                         _edCurY--
                     }
-                }, function (d: number) {
-                    // Cursor move from VKB
-                    if (d === -1) { if (_edCurX > 0) _edCurX-- }
-                    else if (d === 1) { if (_edCurX < _edLines[_edCurY].length) _edCurX++ }
-                    else if (d === -10) { // UP
-                        if (_edCurY > 0) { _edCurY--; _edCurX = Math.min(_edCurX, _edLines[_edCurY].length) }
-                        if (_edCurY < _edScroll) _edScroll = _edCurY
-                    } else if (d === 10) { // DOWN
-                        if (_edCurY < _edLines.length - 1) { _edCurY++; _edCurX = Math.min(_edCurX, _edLines[_edCurY].length) }
-                        if (_edCurY >= _edScroll + 10) _edScroll = _edCurY - 9
-                    }
                 })
+                
             } else if (k === KBD.MENU) {
                 // Il Menu è ora accessibile anche in Guest (sola lettura)
                 _edMode = 1; _edMenuSel = 0; SND.nav()
@@ -1910,8 +1902,12 @@ states.addLoopHandler("app_editor", function () {
                 }
             }
         }
-        if (_edMode === 0) FB.text("[A]Insert [M]Menu [B]Save&Exit", 4, 110, C_GRAY)
-        else if (_edMode === 1) {
+        
+        if (_edMode === 0) {
+            // Aggiunto indicatore visivo per l'Insert Mode
+            if (VKB.isVisible()) FB.text("--- INSERT MODE ---", 4, 110, C_WARN)
+            else FB.text("[A]Insert [M]Menu [B]Save&Exit", 4, 110, C_GRAY)
+        } else if (_edMode === 1) {
             UI.dialog("Editor Options", ["Save", "Open", "Save As", "New Line", "Exit"], 20, 20, 120, 80)
             FB.text(">", 25, 33 + _edMenuSel * FONT_H, C_WARN)
         }

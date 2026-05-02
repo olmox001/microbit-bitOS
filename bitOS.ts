@@ -21,17 +21,17 @@
 //
 // ARCHITETTURA:
 //   LANG    → Internazionalizzazione (IT/EN)
-//   Kernel  → Boot, panic, watchdog, power
+//   Kernel  → Boot, panic, watchdog, power, RTC Time
 //   FB      → Framebuffer (API native screen())
 //   SND     → Audio ed effetti sonori
 //   KBD     → Input: coda eventi + repeat tasti
 //   TTY     → Terminale a scroll
 //   FS      → Filesystem RAM (sessione corrente)
 //   PM      → Background services manager
-//   UI      → Widget: menu, dialog, progress, toast
+//   UI      → Widget: menu, dialog, progress, toast, statusBar
 //   VKB     → Tastiera virtuale on-screen
 //   SENS    → Astrazione sensori
-//   BLE     → BLE HID (keyboard + mouse)
+//   BLE     → BLE HID (keyboard + mouse) + Stato Connessione
 //   DL      → Data Logger (sensori su flash)
 //   APP     → Framework applicazioni + Launcher
 //
@@ -124,7 +124,7 @@ namespace Security {
 }
 
 // ================================================================
-// KERNEL — Boot, Panic, Watchdog, Power
+// KERNEL — Boot, Panic, Watchdog, Power, RTC
 // ================================================================
 namespace Kernel {
     export let hash = 0
@@ -135,6 +135,17 @@ namespace Kernel {
     export let _activeState = "boot"
     const IDLE_DIM = 12     // dim dopo 60s (12 × 5s)
 
+    // Impostazione Orologio Iniziale
+    export function initTime(): void {
+        timeanddate.set24HourTime(12, 0, 0)
+        timeanddate.setDate(1, 1, 2026)
+    }
+
+    // Orologio formattato (HH:MM)
+    export function timeStr(): string {
+        return timeanddate.time(timeanddate.TimeFormat.HMM)
+    }
+
     // Verifica integrità hardware e genera hash univoco
     export function boot(): boolean {
         const serial = control.deviceSerialNumber()
@@ -144,6 +155,8 @@ namespace Kernel {
         hash = serial ^ (time * 31 + temp * 17)
         if (hash === 0) hash = 1
         running = true
+
+        initTime() // Inizializza l'orologio (Time & Date)
 
         // Init Filesystem with Flash persistence
         FS.init()
@@ -735,6 +748,53 @@ namespace PM {
 }
 
 // ================================================================
+// BLE — BLE HID Driver + Gestione Connessione
+// Usa keyboard.sendString() per massima compatibilità
+// ================================================================
+namespace BLE {
+    let _lastSent = ""
+    let _connected = false
+
+    export function init(): void {
+        bluetooth.onBluetoothConnected(function () {
+            _connected = true
+        })
+        bluetooth.onBluetoothDisconnected(function () {
+            _connected = false
+        })
+    }
+
+    export function isConnected(): boolean {
+        return _connected
+    }
+
+    export function sendKeys(text: string): void {
+        keyboard.sendString(text)
+        _lastSent = text
+    }
+
+    // Tasti speciali: usa sendString() con escape sequences
+    export function sendSpecialKey(keyName: string): void {
+        if (keyName === "enter" || keyName === "return") {
+            keyboard.sendString("\n")
+            _lastSent = "[Enter]"
+        } else if (keyName === "backspace") {
+            keyboard.sendString("")
+            _lastSent = "[Backspace]"
+        } else if (keyName === "up" || keyName === "down" || keyName === "left" || keyName === "right") {
+            _lastSent = "[" + keyName.toUpperCase() + "]"
+        } else {
+            _lastSent = "[" + keyName + "]"
+        }
+    }
+
+    export function mouseClickLeft(): void {
+        mouse.click()
+        _lastSent = "[MouseClick]"
+    }
+}
+
+// ================================================================
 // UI — Widget Library
 // ================================================================
 namespace UI {
@@ -844,14 +904,28 @@ namespace UI {
         }
     }
 
-    // Status bar superiore
+    // Status bar superiore con Time + BLE status
     export function statusBar(left: string, right: string): void {
         FB.fillRect(0, 0, SCREEN_W, FONT_H + 2, C_BLUE)
         FB.hline(0, FONT_H + 2, SCREEN_W, C_GRAY) // 1px separator border
         FB.text(left.substr(0, 14), 2, 1, C_FG)
-        if (right.length > 0) {
-            const rx = SCREEN_W - right.length * FONT_W - 2
-            FB.text(right, Math.max(0, rx), 1, C_FG)
+
+        const timeT = Kernel.timeStr()
+        let rxText = right.length > 0 ? right + " " + timeT : timeT
+
+        // Se il testo è troppo lungo, mostriamo solo l'orologio
+        if (rxText.length > 13) {
+            rxText = timeT
+        }
+
+        // Riserviamo spazio extra se è connesso il BLE
+        const bleOffset = BLE.isConnected() ? 10 : 2
+        const rx = SCREEN_W - rxText.length * FONT_W - bleOffset
+        FB.text(rxText, Math.max(0, rx), 1, C_FG)
+
+        // Indicatore visivo Bluetooth Connesso
+        if (BLE.isConnected()) {
+            FB.text("*", SCREEN_W - 8, 1, C_TEAL)
         }
     }
 
@@ -1118,47 +1192,6 @@ namespace SENS {
             Math.abs(input.acceleration(Dimension.Z)), 10
         )
     }
-}
-
-// ================================================================
-// BLE — BLE HID Driver (keyboard + mouse)
-// Usa keyboard.sendString() per massima compatibilità
-// ================================================================
-namespace BLE {
-    let _lastSent = ""
-
-    export function sendKeys(text: string): void {
-        keyboard.sendString(text)
-        _lastSent = text
-    }
-
-    // Tasti speciali: usa sendString() con escape sequences
-    // Per Enter, invio newline; per frecce, niente (non supportate via BLE HID su micro:bit)
-    export function sendSpecialKey(keyName: string): void {
-        if (keyName === "enter" || keyName === "return") {
-            // Enter: invia newline direttamente
-            keyboard.sendString("\n")
-            _lastSent = "[Enter]"
-        } else if (keyName === "backspace") {
-            // Backspace: usa Alt+backspace se supportato, o skip
-            keyboard.sendString("")
-            _lastSent = "[Backspace]"
-        } else if (keyName === "up" || keyName === "down" || keyName === "left" || keyName === "right") {
-            // Frecce: NOT supportate via BLE HID standard su micro:bit
-            // Fallback: noop, log only
-            _lastSent = "[" + keyName.toUpperCase() + "]"
-        } else {
-            _lastSent = "[" + keyName + "]"
-        }
-    }
-
-    export function mouseClickLeft(): void {
-        mouse.click()
-        _lastSent = "[MouseClick]"
-    }
-
-    // Nota: BLE HID su micro:bit NON supporta mouse.move() nativamente
-    // Funzioni di mouse movement rimosse per stabilità API
 }
 
 // ================================================================
@@ -1444,7 +1477,7 @@ function _shellExec(cmd: string): void {
         TTY.writeln(" help ls cd cat echo")
         TTY.writeln(" rm mkdir ps clear")
         TTY.writeln(" run temp light sound")
-        TTY.writeln(" beep free uname ble")
+        TTY.writeln(" beep free uname date")
     } else if (verb === "ls") {
         const fl = FS.list(_shPath)
         if (fl.length === 0) {
@@ -1540,6 +1573,9 @@ function _shellExec(cmd: string): void {
     } else if (verb === "beep") {
         SND.beep(440, 200)
         TTY.writeln("beep!")
+    } else if (verb === "date") {
+        TTY.writeln(timeanddate.date(timeanddate.DateFormat.YYYY_MM_DD))
+        TTY.writeln(timeanddate.time(timeanddate.TimeFormat.HMM))
     } else if (verb === "free") {
         TTY.writeln(LANG.t("Usati: ", "Used: ") + convertToText(FS.usedBytes()) + "b")
         TTY.writeln(LANG.t("Liberi: ", "Free: ") + convertToText(FS.freeBytes()) + "b")
@@ -1549,7 +1585,7 @@ function _shellExec(cmd: string): void {
         TTY.writeln("hash=" + convertToText(Kernel.hash))
     } else if (verb === "ble") {
         TTY.writeln("BLE HID: keyboard+mouse")
-        TTY.writeln(LANG.t("Accoppia da host BT", "Pair from BT host"))
+        TTY.writeln(BLE.isConnected() ? "Stato: Connesso" : "Stato: Disconnesso")
     } else {
         TTY.writeln(LANG.t("sconosciuto: ", "unknown: ") + verb)
     }
@@ -1737,13 +1773,14 @@ states.addLoopHandler("app_files", function () {
 })
 
 // ================================================================
-// APP: TEXT EDITOR / REGEDIT (v2.0 - Cursor Based)
+// APP: TEXT EDITOR / REGEDIT (v2.1 - Horizontal Scroll)
 // ================================================================
 let _edPath = ""
 let _edLines: string[] = []
 let _edCurX = 0
 let _edCurY = 0
 let _edScroll = 0
+let _edScrollX = 0  // Variabile per lo scroll orizzontale
 let _edMode = 0 // 0=View, 1=Menu
 let _edIsSys = false
 let _edSysKey = ""
@@ -1768,7 +1805,7 @@ function _edSave(): void {
 states.setEnterHandler("app_editor", function () {
     KBD.flush()
     _edPath = Kernel.argc > 0 ? Kernel.argv[0] : ""
-    _edCurX = 0; _edCurY = 0; _edScroll = 0; _edMode = 0
+    _edCurX = 0; _edCurY = 0; _edScroll = 0; _edScrollX = 0; _edMode = 0
     _edIsSys = false
 
     if (_startsWith(_edPath, "/sys/") || _startsWith(_edPath, "/svc/")) {
@@ -1809,43 +1846,68 @@ states.addLoopHandler("app_editor", function () {
             }
         } else if (_edMode === 0) { // VIEW / NAV
             if (k === KBD.UP) {
-                if (_edCurY > 0) { _edCurY--; _edCurX = Math.min(_edCurX, _edLines[_edCurY].length) }
+                if (_edCurY > 0) {
+                    _edCurY--;
+                    _edCurX = Math.min(_edCurX, _edLines[_edCurY].length)
+                }
                 if (_edCurY < _edScroll) _edScroll = _edCurY
+                if (_edCurX < _edScrollX) _edScrollX = _edCurX
+                if (_edCurX >= _edScrollX + 24) _edScrollX = Math.max(0, _edCurX - 24)
             } else if (k === KBD.DOWN) {
-                if (_edCurY < _edLines.length - 1) { _edCurY++; _edCurX = Math.min(_edCurX, _edLines[_edCurY].length) }
+                if (_edCurY < _edLines.length - 1) {
+                    _edCurY++;
+                    _edCurX = Math.min(_edCurX, _edLines[_edCurY].length)
+                }
                 if (_edCurY >= _edScroll + 10) _edScroll = _edCurY - 9
+                if (_edCurX < _edScrollX) _edScrollX = _edCurX
+                if (_edCurX >= _edScrollX + 24) _edScrollX = Math.max(0, _edCurX - 24)
             } else if (k === KBD.LEFT) {
-                if (_edCurX > 0) _edCurX--
-                else if (_edCurY > 0) { _edCurY--; _edCurX = _edLines[_edCurY].length }
+                if (_edCurX > 0) {
+                    _edCurX--
+                    if (_edCurX < _edScrollX) _edScrollX = _edCurX
+                }
+                else if (_edCurY > 0) {
+                    _edCurY--;
+                    _edCurX = _edLines[_edCurY].length
+                    if (_edCurY < _edScroll) _edScroll = _edCurY
+                    if (_edCurX >= _edScrollX + 24) _edScrollX = Math.max(0, _edCurX - 24)
+                }
             } else if (k === KBD.RIGHT) {
-                if (_edCurX < _edLines[_edCurY].length) _edCurX++
-                else if (_edCurY < _edLines.length - 1) { _edCurY++; _edCurX = 0 }
+                if (_edCurX < _edLines[_edCurY].length) {
+                    _edCurX++
+                    if (_edCurX >= _edScrollX + 24) _edScrollX = _edCurX - 24
+                }
+                else if (_edCurY < _edLines.length - 1) {
+                    _edCurY++; _edCurX = 0
+                    if (_edCurY >= _edScroll + 10) _edScroll = _edCurY - 9
+                    _edScrollX = 0
+                }
             } else if (k === KBD.A) {
                 // INSERT MODE (Direct VKB)
                 if (!Security.isRoot()) { SND.error(); UI.toast("Read-Only"); return }
-                
-                // CORREZIONE: Rimosso il terzo callback (onMove) per evitare conflitti con il D-pad
+
                 VKB.showDirect(function (ch: string) {
                     const l = _edLines[_edCurY]
                     _edLines[_edCurY] = l.substr(0, _edCurX) + ch + l.substr(_edCurX)
                     _edCurX++
+                    if (_edCurX >= _edScrollX + 24) _edScrollX = _edCurX - 24
                 }, function () {
                     // Backspace
                     if (_edCurX > 0) {
                         const l = _edLines[_edCurY]
                         _edLines[_edCurY] = l.substr(0, _edCurX - 1) + l.substr(_edCurX)
                         _edCurX--
+                        if (_edCurX < _edScrollX) _edScrollX = _edCurX
                     } else if (_edCurY > 0) {
                         _edCurX = _edLines[_edCurY - 1].length
                         _edLines[_edCurY - 1] += _edLines[_edCurY]
                         _edLines.splice(_edCurY, 1)
                         _edCurY--
+                        if (_edCurY < _edScroll) _edScroll = _edCurY
+                        if (_edCurX >= _edScrollX + 24) _edScrollX = Math.max(0, _edCurX - 24)
                     }
                 })
-                
-            } else if (k === KBD.MENU) {
-                // Il Menu è ora accessibile anche in Guest (sola lettura)
-                _edMode = 1; _edMenuSel = 0; SND.nav()
+
             } else if (k === KBD.B) {
                 _edSave(); _exitToLauncher(); return
             }
@@ -1867,7 +1929,8 @@ states.addLoopHandler("app_editor", function () {
                     const newLine = _edLines[_edCurY].substr(_edCurX)
                     _edLines[_edCurY] = _edLines[_edCurY].substr(0, _edCurX)
                     _edLines.insertAt(_edCurY + 1, newLine)
-                    _edCurY++; _edCurX = 0
+                    _edCurY++; _edCurX = 0; _edScrollX = 0
+                    if (_edCurY >= _edScroll + 10) _edScroll = _edCurY - 9
                     _edMode = 0
                 } else if (_edMenuSel === 4) {
                     _exitToLauncher(); return
@@ -1893,18 +1956,20 @@ states.addLoopHandler("app_editor", function () {
             if (idx >= _edLines.length) break
             const y = FONT_H + 8 + i * FONT_H
             const line = _edLines[idx]
-            FB.text(line.substr(0, 26), 4, y, C_FG)
+
+            // Supporto Scroll Orizzontale
+            FB.text(line.substr(_edScrollX, 25), 4, y, C_FG)
+
             if (idx === _edCurY && !VKB.isVisible() && _edMode === 0) {
-                // Render internal cursor
-                const cx = 4 + _edCurX * FONT_W
-                if (cx < SCREEN_W - 4) {
+                // Render internal cursor calcolato con lo scroll offset
+                const cx = 4 + (_edCurX - _edScrollX) * FONT_W
+                if (cx >= 4 && cx < SCREEN_W - 4) {
                     if (input.runningTime() % 600 < 300) FB.vline(cx, y, FONT_H, C_OK)
                 }
             }
         }
-        
+
         if (_edMode === 0) {
-            // Aggiunto indicatore visivo per l'Insert Mode
             if (VKB.isVisible()) FB.text("--- INSERT MODE ---", 4, 110, C_WARN)
             else FB.text("[A]Insert [M]Menu [B]Save&Exit", 4, 110, C_GRAY)
         } else if (_edMode === 1) {
@@ -2112,7 +2177,7 @@ states.addLoopHandler("app_sensors", function () {
 
     // Render
     FB.cls()
-    UI.statusBar(LANG.t("Sensori", "Sensors"), DL.isLogging() ? "REC" : Kernel.uptimeStr())
+    UI.statusBar(LANG.t("Sensori", "Sensors"), DL.isLogging() ? "REC" : "")
 
     // Tabs
     const tabs = [
@@ -2514,6 +2579,7 @@ let _cfgMode = 0  // 0=menu 1=conferma reset
 
 function _cfgItems(): string[] {
     const items = [
+        LANG.t("Ora: ", "Time: ") + Kernel.timeStr(),
         LANG.t("Lingua: ", "Language: ") + (LANG.id === 0 ? "IT" : "EN"),
         LANG.t("Suono: ", "Sound: ") + (SND.isMuted() ? "OFF" : "ON"),
         LANG.t("Data Log: ", "Data Log: ") + (DL.isLogging() ? "REC" : "OFF"),
@@ -2562,20 +2628,30 @@ states.addLoopHandler("app_config", function () {
                         VKB.hide()
                     }, "")
                 } else if (actionIdx === 1) {
-                    LANG.set(LANG.id === 0 ? 1 : 0)
+                    // Imposta Ora (Formato HHMM)
+                    VKB.show(function (txt: string | null) {
+                        if (txt !== null && txt.length >= 4) {
+                            const h = parseInt(txt.substr(0, 2))
+                            const m = parseInt(txt.substr(2, 2))
+                            if (!isNaN(h) && !isNaN(m)) timeanddate.set24HourTime(h, m, 0)
+                        }
+                        VKB.hide()
+                    }, "1200")
                 } else if (actionIdx === 2) {
+                    LANG.set(LANG.id === 0 ? 1 : 0)
+                } else if (actionIdx === 3) {
                     if (Security.isRoot()) SND.setMute(!SND.isMuted())
                     else UI.toast("Sandbox Deny")
-                } else if (actionIdx === 3) {
+                } else if (actionIdx === 4) {
                     if (Security.isRoot()) DL.toggleLogging()
                     else UI.toast("Sandbox Deny")
-                } else if (actionIdx === 4) {
+                } else if (actionIdx === 5) {
                     if (Security.isRoot()) { DL.clearLog(); SND.ok() }
                     else UI.toast("Sandbox Deny")
-                } else if (actionIdx === 5) {
+                } else if (actionIdx === 6) {
                     if (Security.isRoot()) { UI.confirmReset(); _cfgMode = 1 }
                     else UI.toast("Sandbox Deny")
-                } else if (actionIdx === 6) {
+                } else if (actionIdx === 7) {
                     control.reset()
                 }
             }
@@ -2714,9 +2790,9 @@ states.addLoopHandler("boot", function () {
 
 // ================================================================
 // INIZIALIZZAZIONE SISTEMA
-// (BLE services già avviati in cima al file)
 // ================================================================
 KBD.init()
+BLE.init()
 
 if (!Kernel.boot()) {
     Kernel.panic(0xBAAD, "integrity fail")
